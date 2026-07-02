@@ -53,7 +53,7 @@ class PkgbuildTests(unittest.TestCase):
     def test_pkgbuild_contains_runtime_dependencies_seen_in_linux_archive(self):
         pkgbuild = (REPO / "packages" / "m3u-tv-bin" / "PKGBUILD").read_text(encoding="utf-8")
 
-        for dep in ("gtk3", "libsecret", "mpv", "libepoxy", "java-runtime"):
+        for dep in ("gtk3", "libsecret", "mpv", "libepoxy", "java-runtime-headless"):
             self.assertIn(f"'{dep}'", pkgbuild)
 
 

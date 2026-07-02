@@ -11,7 +11,7 @@ license=('custom')
 depends=(
   'gtk3'
   'hicolor-icon-theme'
-  'java-runtime'
+  'java-runtime-headless'
   'libepoxy'
   'libsecret'
   'mpv'
