@@ -53,8 +53,16 @@ class PkgbuildTests(unittest.TestCase):
     def test_pkgbuild_contains_runtime_dependencies_seen_in_linux_archive(self):
         pkgbuild = (REPO / "packages" / "m3u-tv-bin" / "PKGBUILD").read_text(encoding="utf-8")
 
-        for dep in ("gtk3", "libsecret", "mpv", "libepoxy", "java-runtime-headless"):
+        for dep in ("gtk3", "libsecret", "mpv", "libepoxy"):
             self.assertIn(f"'{dep}'", pkgbuild)
+        self.assertNotIn("java-runtime", pkgbuild)
+
+
+    def test_pkgbuild_removes_unused_dart_jni_library(self):
+        pkgbuild = (REPO / "packages" / "m3u-tv-bin" / "PKGBUILD").read_text(encoding="utf-8")
+
+        self.assertIn("rm -f", pkgbuild)
+        self.assertIn("libdartjni.so", pkgbuild)
 
 
 class UpdateParsingTests(unittest.TestCase):
