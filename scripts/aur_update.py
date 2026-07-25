@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 
 
-DEFAULT_RELEASE_API_URL = "https://api.github.com/repos/m3ue/m3u-tv/releases/latest"
+DEFAULT_RELEASE_API_URL = "https://api.github.com/repos/m3ue/m3u-tv/releases?per_page=20"
 DEFAULT_ASSET_REGEX = r"m3u-tv-v(?P<version>[0-9]+\.[0-9]+\.[0-9]+)-linux\.tar\.gz$"
 UA = "m3u-tv-bin-aur-auto-updater/1.0"
 
@@ -49,7 +49,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--release-api-url",
         default=os.getenv("UPSTREAM_RELEASE_API_URL", DEFAULT_RELEASE_API_URL),
-        help="GitHub API URL for the latest upstream release JSON",
+        help="GitHub API URL returning one release object or a bounded release list",
     )
     parser.add_argument(
         "--asset-regex",
@@ -99,13 +99,15 @@ def _write_text(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
-def _fetch_json(url: str, timeout: int) -> dict[str, object]:
+def _fetch_json(url: str, timeout: int) -> dict[str, object] | list[dict[str, object]]:
     request = Request(url, headers={"User-Agent": UA, "Accept": "application/vnd.github+json"}, method="GET")
     with urlopen(request, timeout=timeout) as response:
         payload = json.loads(response.read().decode("utf-8"))
-    if not isinstance(payload, dict):
-        raise RuntimeError("release API did not return a JSON object")
-    return payload
+    if isinstance(payload, dict):
+        return payload
+    if isinstance(payload, list) and all(isinstance(release, dict) for release in payload):
+        return payload
+    raise RuntimeError("release API did not return a JSON object or list of objects")
 
 
 def _hash_streamed(url: str, timeout: int) -> str:
@@ -129,37 +131,48 @@ def _release_assets(payload: dict[str, object]) -> list[dict[str, object]]:
 
 def detect_upstream(release_api_url: str, asset_regex: str, timeout: int) -> tuple[str, str, str]:
     payload = _fetch_json(release_api_url, timeout)
+    releases = payload if isinstance(payload, list) else [payload]
     pattern = re.compile(asset_regex)
-    matches: list[tuple[dict[str, object], re.Match[str]]] = []
-    for asset in _release_assets(payload):
+    considered_assets: list[str] = []
+
+    for release in releases:
+        if release.get("draft") or release.get("prerelease"):
+            continue
+        assets = _release_assets(release)
+        considered_assets.extend(str(asset.get("name") or "") for asset in assets)
+        matches: list[tuple[dict[str, object], re.Match[str]]] = []
+        for asset in assets:
+            name = str(asset.get("name") or "")
+            match = pattern.search(name)
+            if match:
+                matches.append((asset, match))
+
+        if not matches:
+            continue
+        if len(matches) > 1:
+            names = ", ".join(str(asset.get("name") or "") for asset, _ in matches)
+            tag = str(release.get("tag_name") or "<unknown>")
+            raise RuntimeError(f"multiple Linux release assets matched {asset_regex!r} for {tag}: {names}")
+
+        asset, match = matches[0]
         name = str(asset.get("name") or "")
-        match = pattern.search(name)
-        if match:
-            matches.append((asset, match))
+        url = str(asset.get("browser_download_url") or "")
+        if not url:
+            raise RuntimeError(f"release asset {name} has no browser_download_url")
 
-    if not matches:
-        names = ", ".join(str(asset.get("name") or "") for asset in _release_assets(payload))
-        raise RuntimeError(f"no Linux release asset matched {asset_regex!r}; assets: {names}")
-    if len(matches) > 1:
-        names = ", ".join(str(asset.get("name") or "") for asset, _ in matches)
-        raise RuntimeError(f"multiple Linux release assets matched {asset_regex!r}: {names}")
+        version = match.groupdict().get("version")
+        if not version:
+            tag = str(release.get("tag_name") or "")
+            version = tag[1:] if tag.startswith("v") else tag
+        if not version:
+            raise RuntimeError(f"could not extract version from asset {name}")
 
-    asset, match = matches[0]
-    name = str(asset.get("name") or "")
-    url = str(asset.get("browser_download_url") or "")
-    if not url:
-        raise RuntimeError(f"release asset {name} has no browser_download_url")
+        source = f"m3u-tv-{version}-linux.tar.gz::{url}"
+        checksum = _hash_streamed(url, timeout)
+        return version, source, checksum
 
-    version = match.groupdict().get("version")
-    if not version:
-        tag = str(payload.get("tag_name") or "")
-        version = tag[1:] if tag.startswith("v") else tag
-    if not version:
-        raise RuntimeError(f"could not extract version from asset {name}")
-
-    source = f"m3u-tv-{version}-linux.tar.gz::{url}"
-    checksum = _hash_streamed(url, timeout)
-    return version, source, checksum
+    names = ", ".join(considered_assets)
+    raise RuntimeError(f"no Linux release asset matched {asset_regex!r}; assets: {names}")
 
 
 def _extract_field(lines: list[str], field: str) -> str | None:

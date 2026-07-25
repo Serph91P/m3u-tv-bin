@@ -100,6 +100,57 @@ class UpdateParsingTests(unittest.TestCase):
         self.assertEqual(checksum, "abc123")
         self.assertEqual(seen, [("https://example.invalid/linux.tar.gz", 9)])
 
+    def test_detect_upstream_skips_newer_release_without_linux_asset(self):
+        payload = [
+            {
+                "tag_name": "v1.2.4",
+                "draft": False,
+                "prerelease": False,
+                "assets": [
+                    {
+                        "name": "m3u-tv-v1.2.4-android.apk",
+                        "browser_download_url": "https://example.invalid/android.apk",
+                    }
+                ],
+            },
+            {
+                "tag_name": "v1.2.3",
+                "draft": False,
+                "prerelease": False,
+                "assets": [
+                    {
+                        "name": "m3u-tv-v1.2.3-linux.tar.gz",
+                        "browser_download_url": "https://example.invalid/linux.tar.gz",
+                    }
+                ],
+            },
+        ]
+        seen = []
+
+        old_fetch = aur_update._fetch_json
+        old_hash = aur_update._hash_streamed
+        try:
+            aur_update._fetch_json = lambda url, timeout: payload
+
+            def fake_hash(url, timeout):
+                seen.append((url, timeout))
+                return "abc123"
+
+            aur_update._hash_streamed = fake_hash
+            pkgver, source, checksum = aur_update.detect_upstream(
+                "https://api.example.invalid/releases?per_page=20",
+                r"m3u-tv-v(?P<version>[0-9]+\.[0-9]+\.[0-9]+)-linux\.tar\.gz$",
+                9,
+            )
+        finally:
+            aur_update._fetch_json = old_fetch
+            aur_update._hash_streamed = old_hash
+
+        self.assertEqual(pkgver, "1.2.3")
+        self.assertEqual(source, "m3u-tv-1.2.3-linux.tar.gz::https://example.invalid/linux.tar.gz")
+        self.assertEqual(checksum, "abc123")
+        self.assertEqual(seen, [("https://example.invalid/linux.tar.gz", 9)])
+
     def test_detect_upstream_fails_when_multiple_linux_assets_match(self):
         payload = {
             "tag_name": "v1.2.3",

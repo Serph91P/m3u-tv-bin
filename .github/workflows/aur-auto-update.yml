@@ -10,9 +10,9 @@ on:
         required: false
         default: 'm3u-tv-bin'
       release_api_url:
-        description: 'GitHub API URL for latest upstream release JSON'
+        description: 'GitHub API URL for an upstream release object or bounded release list'
         required: false
-        default: 'https://api.github.com/repos/m3ue/m3u-tv/releases/latest'
+        default: 'https://api.github.com/repos/m3ue/m3u-tv/releases?per_page=20'
       asset_regex:
         description: 'Regex to select the Linux archive asset and extract version'
         required: false
@@ -90,7 +90,7 @@ jobs:
             RELEASE_API_URL="${{ vars.UPSTREAM_RELEASE_API_URL }}"
           fi
           if [ -z "$RELEASE_API_URL" ]; then
-            RELEASE_API_URL="https://api.github.com/repos/m3ue/m3u-tv/releases/latest"
+            RELEASE_API_URL="https://api.github.com/repos/m3ue/m3u-tv/releases?per_page=20"
           fi
 
           ASSET_REGEX="${{ github.event.inputs.asset_regex }}"
