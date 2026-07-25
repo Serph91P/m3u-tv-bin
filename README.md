@@ -2,13 +2,13 @@
 
 This repository maintains an Arch User Repository package template for the m3u-tv Linux binary release.
 
-A scheduled GitHub Actions workflow checks the latest `m3ue/m3u-tv` GitHub release, updates package metadata when a new Linux build is available, validates the package in an Arch Linux container, and publishes the refreshed files to AUR when the AUR SSH secrets are configured.
+A scheduled GitHub Actions workflow checks a bounded `m3ue/m3u-tv` GitHub release list in API order. It skips draft, prerelease, and releases without a Linux build, selects the first published release with exactly one matching Linux asset, updates package metadata, validates the package in an Arch Linux container, and publishes the refreshed files to AUR when the AUR SSH secrets are configured.
 
 ## What the workflow does
 
-1. Fetches the latest upstream GitHub release metadata.
-2. Selects the `m3u-tv-*-linux.tar.gz` release asset.
-3. Extracts the version from the asset name or release tag.
+1. Fetches a bounded upstream GitHub release list in API order, or a custom single-release JSON object.
+2. Selects the first published, non-draft, non-prerelease release with exactly one `m3u-tv-*-linux.tar.gz` asset.
+3. Extracts the version from the selected asset name or release tag.
 4. Computes the release asset SHA256 checksum.
 5. Updates `packages/m3u-tv-bin/PKGBUILD` and regenerates `.SRCINFO`.
 6. Builds and checks the package in an Arch Linux environment.
