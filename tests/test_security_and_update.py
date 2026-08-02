@@ -59,6 +59,14 @@ def workflow_steps() -> list[dict[str, object]]:
     return steps
 
 
+def executable_shell_source(step: dict[str, object]) -> str:
+    return "\n".join(
+        str(line)
+        for line in step["run"]  # type: ignore[union-attr]
+        if str(line).strip() and not str(line).lstrip().startswith("#")
+    )
+
+
 class PublishSecurityTests(unittest.TestCase):
     def test_push_rejects_invalid_package_name_before_publication_setup(self):
         args = argparse.Namespace(
@@ -128,6 +136,19 @@ class PkgbuildTests(unittest.TestCase):
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_executable_shell_source_excludes_comments(self):
+        step = {
+            "run": [
+                "# validate_single_line \"asset_regex\" \"$ASSET_REGEX\"",
+                "validate_package_name \"$PACKAGE_NAME\"",
+            ]
+        }
+
+        self.assertEqual(
+            executable_shell_source(step),
+            'validate_package_name "$PACKAGE_NAME"',
+        )
+
     def test_asset_regex_defaults_match_updater(self):
         workflow = (REPO / ".github" / "workflows" / "aur-auto-update.yml").read_text(encoding="utf-8")
         shell_regex = aur_update.DEFAULT_ASSET_REGEX.replace("\\", "\\\\")
@@ -136,16 +157,14 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn(f'ASSET_REGEX="{shell_regex}"', workflow)
 
     def test_shell_steps_bind_and_validate_untrusted_workflow_inputs(self):
+        workflow = (REPO / ".github" / "workflows" / "aur-auto-update.yml").read_text(
+            encoding="utf-8"
+        )
         steps = workflow_steps()
         shell_steps = [step for step in steps if step["run"]]
         self.assertTrue(shell_steps)
         for step in shell_steps:
-            executable_lines = [
-                line
-                for line in step["run"]
-                if not str(line).lstrip().startswith("#")
-            ]
-            shell_source = "\n".join(str(line) for line in executable_lines)
+            shell_source = executable_shell_source(step)
             self.assertNotIn("${{ github.event.inputs.", shell_source)
             self.assertNotIn("${{ vars.", shell_source)
 
@@ -162,13 +181,41 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(env["VARIABLE_RELEASE_API_URL"], "${{ vars.UPSTREAM_RELEASE_API_URL }}")
         self.assertEqual(env["INPUT_ASSET_REGEX"], "${{ github.event.inputs.asset_regex }}")
         self.assertEqual(env["VARIABLE_ASSET_REGEX"], "${{ vars.UPSTREAM_ASSET_REGEX }}")
+        self.assertEqual(env["INPUT_RUN_BUILD"], "${{ github.event.inputs.run_build }}")
+        self.assertEqual(env["INPUT_PUSH"], "${{ github.event.inputs.push }}")
+        self.assertEqual(env["INPUT_FORCE_PUBLISH"], "${{ github.event.inputs.force_publish }}")
 
-        shell_source = "\n".join(resolve[0]["run"])
-        self.assertIn("validate_package_name", shell_source)
-        self.assertIn("validate_boolean", shell_source)
-        self.assertLess(shell_source.index("validate_package_name \"$PACKAGE_NAME\""), shell_source.index("$GITHUB_ENV"))
-        for value in ("$BUILD", "$PUSH", "$FORCE_PUBLISH"):
-            self.assertLess(shell_source.index(f'validate_boolean "{value}"'), shell_source.index("$GITHUB_ENV"))
+        untrusted_expressions = re.findall(
+            r"\$\{\{\s*(?:github\.event\.inputs|vars)\.[^}]+\}\}", workflow
+        )
+        self.assertCountEqual(untrusted_expressions, [str(value) for value in env.values()])
+
+        shell_source = executable_shell_source(resolve[0])
+        protocol_write = shell_source.index("$GITHUB_ENV")
+        validations = [
+            'validate_package_name "$PACKAGE_NAME"',
+            'validate_boolean "$BUILD"',
+            'validate_boolean "$PUSH"',
+            'validate_boolean "$FORCE_PUBLISH"',
+            'validate_single_line "release_api_url" "$RELEASE_API_URL"',
+            'validate_single_line "asset_regex" "$ASSET_REGEX"',
+        ]
+        for validation in validations:
+            self.assertLess(shell_source.index(validation), protocol_write)
+
+        resolve_index = steps.index(resolve[0])
+        for name in (
+            "Run update script as unprivileged user",
+            "Commit package update back to GitHub",
+            "Push update to AUR",
+        ):
+            use = [
+                step
+                for step in steps
+                if step["job"] == "aur_update" and step["name"] == name
+            ]
+            self.assertEqual(len(use), 1)
+            self.assertLess(resolve_index, steps.index(use[0]))
 
     def test_executable_dependencies_use_canonical_immutable_references(self):
         workflow = (REPO / ".github" / "workflows" / "aur-auto-update.yml").read_text(
@@ -191,12 +238,7 @@ class WorkflowTests(unittest.TestCase):
         shell_steps = [step for step in workflow_steps() if step["run"]]
 
         for step in shell_steps:
-            executable_lines = [
-                line
-                for line in step["run"]
-                if not str(line).lstrip().startswith("#")
-            ]
-            self.assertNotIn("${{", "\n".join(str(line) for line in executable_lines))
+            self.assertNotIn("${{", executable_shell_source(step))
 
 
 class UpdateParsingTests(unittest.TestCase):
