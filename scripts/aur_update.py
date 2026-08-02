@@ -82,6 +82,8 @@ def _to_path(value: str | None) -> Path:
 
 
 def resolve_paths(args: argparse.Namespace) -> tuple[Path, Path]:
+    if not re.fullmatch(r"[a-z0-9@_+][a-z0-9@._+-]*", args.package_name):
+        raise ValueError(f"invalid AUR package name: {args.package_name}")
     repo_root = Path(__file__).resolve().parents[1]
     package_dir = _to_path(args.package_dir) if args.package_dir else repo_root / "packages" / args.package_name
     pkgbuild_path = package_dir / "PKGBUILD"
@@ -248,8 +250,7 @@ def _replace_array_first(lines: list[str], field: str, new_value: str) -> tuple[
         return False, old_tokens
 
     if start == end:
-        quote = '"' if '"' in lines[start].split("(", 1)[1].split(")", 1)[0] else "'"
-        rendered = " ".join(f"{quote}{token}{quote}" for token in tokens)
+        rendered = " ".join(_quote(token) for token in tokens)
         prefix = lines[start].split("=", 1)[0]
         lines[start] = f"{prefix}=({rendered})\n"
     else:

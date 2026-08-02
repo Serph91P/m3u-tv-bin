@@ -38,7 +38,7 @@ jobs:
     name: Update and publish AUR package
     runs-on: ubuntu-latest
     container:
-      image: archlinux:base-devel
+      image: archlinux:base-devel@sha256:40d14ac9db5af04f695eacd82a53181ad685fecc2534a66e05a51182a077cbd5
     permissions:
       contents: write
 
@@ -62,7 +62,7 @@ jobs:
           useradd -m -s /bin/bash aurbuild
 
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Prepare workspace permissions
         run: |
@@ -76,52 +76,88 @@ jobs:
 
       - name: Resolve workflow inputs
         id: resolve
+        env:
+          INPUT_PACKAGE_NAME: ${{ github.event.inputs.package_name }}
+          VARIABLE_PACKAGE_NAME: ${{ vars.AUR_PACKAGE_NAME }}
+          INPUT_RELEASE_API_URL: ${{ github.event.inputs.release_api_url }}
+          VARIABLE_RELEASE_API_URL: ${{ vars.UPSTREAM_RELEASE_API_URL }}
+          INPUT_ASSET_REGEX: ${{ github.event.inputs.asset_regex }}
+          VARIABLE_ASSET_REGEX: ${{ vars.UPSTREAM_ASSET_REGEX }}
+          INPUT_RUN_BUILD: ${{ github.event.inputs.run_build }}
+          INPUT_PUSH: ${{ github.event.inputs.push }}
+          INPUT_FORCE_PUBLISH: ${{ github.event.inputs.force_publish }}
         run: |
-          PACKAGE_NAME="${{ github.event.inputs.package_name }}"
+          validate_package_name() {
+            if [[ ! "$1" =~ ^[a-z0-9@_+][a-z0-9@._+-]*$ ]]; then
+              echo "Invalid AUR package name: $1" >&2
+              exit 1
+            fi
+          }
+          validate_boolean() {
+            if [[ "$1" != "true" && "$1" != "false" ]]; then
+              echo "Invalid boolean value: $1" >&2
+              exit 1
+            fi
+          }
+          validate_single_line() {
+            if [[ "$2" == *$'\n'* || "$2" == *$'\r'* ]]; then
+              echo "$1 must be a single line" >&2
+              exit 1
+            fi
+          }
+
+          PACKAGE_NAME="$INPUT_PACKAGE_NAME"
           if [ -z "$PACKAGE_NAME" ]; then
-            PACKAGE_NAME="${{ vars.AUR_PACKAGE_NAME }}"
+            PACKAGE_NAME="$VARIABLE_PACKAGE_NAME"
           fi
           if [ -z "$PACKAGE_NAME" ]; then
             PACKAGE_NAME="m3u-tv-bin"
           fi
 
-          RELEASE_API_URL="${{ github.event.inputs.release_api_url }}"
+          RELEASE_API_URL="$INPUT_RELEASE_API_URL"
           if [ -z "$RELEASE_API_URL" ]; then
-            RELEASE_API_URL="${{ vars.UPSTREAM_RELEASE_API_URL }}"
+            RELEASE_API_URL="$VARIABLE_RELEASE_API_URL"
           fi
           if [ -z "$RELEASE_API_URL" ]; then
             RELEASE_API_URL="https://api.github.com/repos/m3ue/m3u-tv/releases?per_page=20"
           fi
 
-          ASSET_REGEX="${{ github.event.inputs.asset_regex }}"
+          ASSET_REGEX="$INPUT_ASSET_REGEX"
           if [ -z "$ASSET_REGEX" ]; then
-            ASSET_REGEX="${{ vars.UPSTREAM_ASSET_REGEX }}"
+            ASSET_REGEX="$VARIABLE_ASSET_REGEX"
           fi
           if [ -z "$ASSET_REGEX" ]; then
             ASSET_REGEX="m3u-tv-v(?P<version>[0-9]+\\.[0-9]+\\.[0-9]+)-linux\\.(?P<archive>zip|tar\\.gz)$"
           fi
 
-          BUILD="${{ github.event.inputs.run_build }}"
+          BUILD="$INPUT_RUN_BUILD"
           if [ -z "$BUILD" ]; then
             BUILD="true"
           fi
 
-          PUSH="${{ github.event.inputs.push }}"
+          PUSH="$INPUT_PUSH"
           if [ -z "$PUSH" ]; then
             PUSH="true"
           fi
 
-          FORCE_PUBLISH="${{ github.event.inputs.force_publish }}"
+          FORCE_PUBLISH="$INPUT_FORCE_PUBLISH"
           if [ -z "$FORCE_PUBLISH" ]; then
             FORCE_PUBLISH="false"
           fi
 
-          echo "AUR_PACKAGE_NAME=$PACKAGE_NAME" >> "$GITHUB_ENV"
-          echo "UPSTREAM_RELEASE_API_URL=$RELEASE_API_URL" >> "$GITHUB_ENV"
-          echo "UPSTREAM_ASSET_REGEX=$ASSET_REGEX" >> "$GITHUB_ENV"
-          echo "RUN_BUILD=$BUILD" >> "$GITHUB_ENV"
-          echo "PUSH_TO_AUR=$PUSH" >> "$GITHUB_ENV"
-          echo "FORCE_PUBLISH=$FORCE_PUBLISH" >> "$GITHUB_ENV"
+          validate_package_name "$PACKAGE_NAME"
+          validate_boolean "$BUILD"
+          validate_boolean "$PUSH"
+          validate_boolean "$FORCE_PUBLISH"
+          validate_single_line "release_api_url" "$RELEASE_API_URL"
+          validate_single_line "asset_regex" "$ASSET_REGEX"
+
+          printf 'AUR_PACKAGE_NAME=%s\n' "$PACKAGE_NAME" >> "$GITHUB_ENV"
+          printf 'UPSTREAM_RELEASE_API_URL=%s\n' "$RELEASE_API_URL" >> "$GITHUB_ENV"
+          printf 'UPSTREAM_ASSET_REGEX=%s\n' "$ASSET_REGEX" >> "$GITHUB_ENV"
+          printf 'RUN_BUILD=%s\n' "$BUILD" >> "$GITHUB_ENV"
+          printf 'PUSH_TO_AUR=%s\n' "$PUSH" >> "$GITHUB_ENV"
+          printf 'FORCE_PUBLISH=%s\n' "$FORCE_PUBLISH" >> "$GITHUB_ENV"
 
       - name: Run update script as unprivileged user
         id: update
@@ -164,6 +200,8 @@ jobs:
 
       - name: Commit package update back to GitHub
         if: steps.result.outputs.changed == 'true'
+        env:
+          PACKAGE_VERSION: ${{ steps.result.outputs.version }}
         run: |
           cd "$GITHUB_WORKSPACE"
           git config user.email "actions@github.com"
@@ -173,7 +211,7 @@ jobs:
             echo "No GitHub changes to commit."
             exit 0
           fi
-          git commit -m "$AUR_PACKAGE_NAME: update to ${{ steps.result.outputs.version }}"
+          git commit -m "$AUR_PACKAGE_NAME: update to $PACKAGE_VERSION"
           git push
 
       - name: Push update to AUR
@@ -181,6 +219,7 @@ jobs:
         env:
           AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
           AUR_SSH_KNOWN_HOSTS: ${{ secrets.AUR_SSH_KNOWN_HOSTS }}
+          PACKAGE_VERSION: ${{ steps.result.outputs.version }}
         run: |
           if [ -z "$AUR_SSH_KEY" ]; then
             echo "Missing AUR_SSH_KEY secret. Skipping AUR push."
@@ -193,4 +232,4 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           python3 scripts/publish_aur.py \
             --package-name "$AUR_PACKAGE_NAME" \
-            --package-ver "${{ steps.result.outputs.version }}"
+            --package-ver "$PACKAGE_VERSION"

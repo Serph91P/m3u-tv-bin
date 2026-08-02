@@ -1,5 +1,7 @@
 # pyright: reportMissingImports=false
 import argparse
+import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -12,7 +14,67 @@ import aur_update
 import publish_aur
 
 
+def workflow_steps() -> list[dict[str, object]]:
+    workflow = (REPO / ".github" / "workflows" / "aur-auto-update.yml").read_text(
+        encoding="utf-8"
+    )
+    steps: list[dict[str, object]] = []
+    job = None
+    current = None
+    section = None
+    run_indent = None
+
+    for line in workflow.splitlines():
+        job_match = re.match(r"^  ([a-zA-Z0-9_-]+):\s*$", line)
+        if job_match:
+            job = job_match.group(1)
+        step_match = re.match(r"^      - name:\s*(.+?)\s*$", line)
+        if step_match:
+            current = {"job": job, "name": step_match.group(1), "env": {}, "run": []}
+            steps.append(current)
+            section = None
+            run_indent = None
+            continue
+        if current is None:
+            continue
+        if line == "        env:":
+            section = "env"
+            continue
+        run_match = re.match(r"^(\s*)run:\s*\|\s*$", line)
+        if run_match:
+            section = "run"
+            run_indent = len(run_match.group(1)) + 2
+            continue
+        if section == "env":
+            env_match = re.match(r"^          ([A-Z0-9_]+):\s*(.+?)\s*$", line)
+            if env_match:
+                current["env"][env_match.group(1)] = env_match.group(2)  # type: ignore[index]
+            elif line.strip() and len(line) - len(line.lstrip()) <= 8:
+                section = None
+        elif section == "run" and (not line.strip() or len(line) - len(line.lstrip()) >= run_indent):
+            current["run"].append(line[run_indent:])  # type: ignore[union-attr]
+        elif section == "run":
+            section = None
+
+    return steps
+
+
 class PublishSecurityTests(unittest.TestCase):
+    def test_push_rejects_invalid_package_name_before_publication_setup(self):
+        args = argparse.Namespace(
+            package_name="../outside",
+            package_dir=str(REPO / "packages" / "m3u-tv-bin"),
+            aur_remote_template="ssh://aur@aur.archlinux.org/{package}.git",
+            push_ssh_key="",
+            ssh_known_hosts="",
+            commit_email="actions@github.com",
+            commit_name="AUR Update Bot",
+            package_ver=None,
+        )
+
+        with self.assertRaisesRegex(ValueError, "invalid AUR package name"):
+            publish_aur.push_package(args)
+
     def test_push_requires_known_hosts_when_key_is_present(self):
         args = argparse.Namespace(
             package_name="m3u-tv-bin",
@@ -73,8 +135,77 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn(f"default: '{aur_update.DEFAULT_ASSET_REGEX}'", workflow)
         self.assertIn(f'ASSET_REGEX="{shell_regex}"', workflow)
 
+    def test_shell_steps_bind_and_validate_untrusted_workflow_inputs(self):
+        steps = workflow_steps()
+        shell_steps = [step for step in steps if step["run"]]
+        self.assertTrue(shell_steps)
+        for step in shell_steps:
+            executable_lines = [
+                line
+                for line in step["run"]
+                if not str(line).lstrip().startswith("#")
+            ]
+            shell_source = "\n".join(str(line) for line in executable_lines)
+            self.assertNotIn("${{ github.event.inputs.", shell_source)
+            self.assertNotIn("${{ vars.", shell_source)
+
+        resolve = [
+            step
+            for step in steps
+            if step["job"] == "aur_update" and step["name"] == "Resolve workflow inputs"
+        ]
+        self.assertEqual(len(resolve), 1)
+        env = resolve[0]["env"]
+        self.assertEqual(env["INPUT_PACKAGE_NAME"], "${{ github.event.inputs.package_name }}")
+        self.assertEqual(env["VARIABLE_PACKAGE_NAME"], "${{ vars.AUR_PACKAGE_NAME }}")
+        self.assertEqual(env["INPUT_RELEASE_API_URL"], "${{ github.event.inputs.release_api_url }}")
+        self.assertEqual(env["VARIABLE_RELEASE_API_URL"], "${{ vars.UPSTREAM_RELEASE_API_URL }}")
+        self.assertEqual(env["INPUT_ASSET_REGEX"], "${{ github.event.inputs.asset_regex }}")
+        self.assertEqual(env["VARIABLE_ASSET_REGEX"], "${{ vars.UPSTREAM_ASSET_REGEX }}")
+
+        shell_source = "\n".join(resolve[0]["run"])
+        self.assertIn("validate_package_name", shell_source)
+        self.assertIn("validate_boolean", shell_source)
+        self.assertLess(shell_source.index("validate_package_name \"$PACKAGE_NAME\""), shell_source.index("$GITHUB_ENV"))
+        for value in ("$BUILD", "$PUSH", "$FORCE_PUBLISH"):
+            self.assertLess(shell_source.index(f'validate_boolean "{value}"'), shell_source.index("$GITHUB_ENV"))
+
+    def test_executable_dependencies_use_canonical_immutable_references(self):
+        workflow = (REPO / ".github" / "workflows" / "aur-auto-update.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertEqual(
+            re.findall(r"^\s+uses:\s*(\S+)", workflow, re.MULTILINE),
+            ["actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803"],
+        )
+        self.assertEqual(
+            re.findall(r"^\s+image:\s*(\S+)", workflow, re.MULTILINE),
+            [
+                "archlinux:base-devel@sha256:"
+                "40d14ac9db5af04f695eacd82a53181ad685fecc2534a66e05a51182a077cbd5"
+            ],
+        )
+
+    def test_shell_steps_do_not_interpolate_github_expressions(self):
+        shell_steps = [step for step in workflow_steps() if step["run"]]
+
+        for step in shell_steps:
+            executable_lines = [
+                line
+                for line in step["run"]
+                if not str(line).lstrip().startswith("#")
+            ]
+            self.assertNotIn("${{", "\n".join(str(line) for line in executable_lines))
+
 
 class UpdateParsingTests(unittest.TestCase):
+    def test_resolve_paths_rejects_invalid_package_name_before_path_use(self):
+        args = argparse.Namespace(package_name="../outside", package_dir=None)
+
+        with self.assertRaisesRegex(ValueError, "invalid AUR package name"):
+            aur_update.resolve_paths(args)
+
     def test_detect_upstream_selects_zip_with_default_regex(self):
         payload = {
             "tag_name": "v1.0.7",
@@ -270,6 +401,37 @@ class UpdateParsingTests(unittest.TestCase):
         self.assertTrue(changed)
         self.assertEqual(old, ("old",))
         self.assertEqual(lines[0], "source=('new-value')\n")
+
+    def test_generated_single_line_source_keeps_shell_payload_inert(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pkgbuild = root / "PKGBUILD"
+            sentinel = root / "sentinel"
+            source = "archive::https://example.invalid/release'$(touch \"$PWD/sentinel\")'.zip"
+            pkgbuild.write_text(
+                "pkgver=1.0.0\n"
+                "source=('archive::https://example.invalid/old.zip')\n"
+                "sha256sums=('oldsha')\n",
+                encoding="utf-8",
+            )
+
+            aur_update.update_pkgbuild(pkgbuild, "1.0.1", source, "newsha", False)
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; printf "%s" "${source[0]}"',
+                    "bash",
+                    pkgbuild.name,
+                ],
+                cwd=root,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertFalse(sentinel.exists())
+            self.assertEqual(result.stdout, source)
 
     def test_run_updates_pkgbuild_before_generating_srcinfo(self):
         with tempfile.TemporaryDirectory() as tmp:
