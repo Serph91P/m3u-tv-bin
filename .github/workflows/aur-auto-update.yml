@@ -16,7 +16,7 @@ on:
       asset_regex:
         description: 'Regex to select the Linux archive asset and extract version'
         required: false
-        default: 'm3u-tv-v(?P<version>[0-9]+\.[0-9]+\.[0-9]+)-linux\.tar\.gz$'
+        default: 'm3u-tv-v(?P<version>[0-9]+\.[0-9]+\.[0-9]+)-linux\.(?P<archive>zip|tar\.gz)$'
       run_build:
         description: 'Run makepkg build and namcap checks'
         required: false
@@ -98,7 +98,7 @@ jobs:
             ASSET_REGEX="${{ vars.UPSTREAM_ASSET_REGEX }}"
           fi
           if [ -z "$ASSET_REGEX" ]; then
-            ASSET_REGEX="m3u-tv-v(?P<version>[0-9]+\\.[0-9]+\\.[0-9]+)-linux\\.tar\\.gz$"
+            ASSET_REGEX="m3u-tv-v(?P<version>[0-9]+\\.[0-9]+\\.[0-9]+)-linux\\.(?P<archive>zip|tar\\.gz)$"
           fi
 
           BUILD="${{ github.event.inputs.run_build }}"
