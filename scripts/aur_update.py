@@ -16,7 +16,7 @@ from urllib.request import Request, urlopen
 
 
 DEFAULT_RELEASE_API_URL = "https://api.github.com/repos/m3ue/m3u-tv/releases?per_page=20"
-DEFAULT_ASSET_REGEX = r"m3u-tv-v(?P<version>[0-9]+\.[0-9]+\.[0-9]+)-linux\.tar\.gz$"
+DEFAULT_ASSET_REGEX = r"m3u-tv-v(?P<version>[0-9]+\.[0-9]+\.[0-9]+)-linux\.(?P<archive>zip|tar\.gz)$"
 UA = "m3u-tv-bin-aur-auto-updater/1.0"
 
 
@@ -149,12 +149,14 @@ def detect_upstream(release_api_url: str, asset_regex: str, timeout: int) -> tup
 
         if not matches:
             continue
-        if len(matches) > 1:
-            names = ", ".join(str(asset.get("name") or "") for asset, _ in matches)
+        zip_matches = [match for match in matches if str(match[0].get("name") or "").endswith(".zip")]
+        preferred_matches = zip_matches or matches
+        if len(preferred_matches) > 1:
+            names = ", ".join(str(asset.get("name") or "") for asset, _ in preferred_matches)
             tag = str(release.get("tag_name") or "<unknown>")
             raise RuntimeError(f"multiple Linux release assets matched {asset_regex!r} for {tag}: {names}")
 
-        asset, match = matches[0]
+        asset, match = preferred_matches[0]
         name = str(asset.get("name") or "")
         url = str(asset.get("browser_download_url") or "")
         if not url:
@@ -167,7 +169,10 @@ def detect_upstream(release_api_url: str, asset_regex: str, timeout: int) -> tup
         if not version:
             raise RuntimeError(f"could not extract version from asset {name}")
 
-        source = f"m3u-tv-{version}-linux.tar.gz::{url}"
+        archive = match.groupdict().get("archive")
+        if not archive:
+            archive = "tar.gz" if name.endswith(".tar.gz") else name.rsplit(".", 1)[-1]
+        source = f"m3u-tv-{version}-linux.{archive}::{url}"
         checksum = _hash_streamed(url, timeout)
         return version, source, checksum
 
