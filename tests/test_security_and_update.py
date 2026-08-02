@@ -65,7 +65,98 @@ class PkgbuildTests(unittest.TestCase):
         self.assertIn("libdartjni.so", pkgbuild)
 
 
+class WorkflowTests(unittest.TestCase):
+    def test_asset_regex_defaults_match_updater(self):
+        workflow = (REPO / ".github" / "workflows" / "aur-auto-update.yml").read_text(encoding="utf-8")
+        shell_regex = aur_update.DEFAULT_ASSET_REGEX.replace("\\", "\\\\")
+
+        self.assertIn(f"default: '{aur_update.DEFAULT_ASSET_REGEX}'", workflow)
+        self.assertIn(f'ASSET_REGEX="{shell_regex}"', workflow)
+
+
 class UpdateParsingTests(unittest.TestCase):
+    def test_detect_upstream_selects_zip_with_default_regex(self):
+        payload = {
+            "tag_name": "v1.0.7",
+            "assets": [
+                {
+                    "name": "m3u-tv-v1.0.7-linux.zip",
+                    "browser_download_url": "https://example.invalid/m3u-tv-v1.0.7-linux.zip",
+                }
+            ],
+        }
+        seen = []
+
+        old_fetch = aur_update._fetch_json
+        old_hash = aur_update._hash_streamed
+        try:
+            aur_update._fetch_json = lambda url, timeout: payload
+
+            def fake_hash(url, timeout):
+                seen.append((url, timeout))
+                return "zipsha"
+
+            aur_update._hash_streamed = fake_hash
+            pkgver, source, checksum = aur_update.detect_upstream(
+                "https://api.example.invalid/latest",
+                aur_update.DEFAULT_ASSET_REGEX,
+                9,
+            )
+        finally:
+            aur_update._fetch_json = old_fetch
+            aur_update._hash_streamed = old_hash
+
+        self.assertEqual(pkgver, "1.0.7")
+        self.assertEqual(
+            source,
+            "m3u-tv-1.0.7-linux.zip::https://example.invalid/m3u-tv-v1.0.7-linux.zip",
+        )
+        self.assertEqual(checksum, "zipsha")
+        self.assertEqual(seen, [("https://example.invalid/m3u-tv-v1.0.7-linux.zip", 9)])
+
+    def test_detect_upstream_prefers_zip_when_both_formats_are_present(self):
+        payload = {
+            "tag_name": "v1.0.7",
+            "assets": [
+                {
+                    "name": "m3u-tv-v1.0.7-linux.tar.gz",
+                    "browser_download_url": "https://example.invalid/m3u-tv-v1.0.7-linux.tar.gz",
+                },
+                {
+                    "name": "m3u-tv-v1.0.7-linux.zip",
+                    "browser_download_url": "https://example.invalid/m3u-tv-v1.0.7-linux.zip",
+                },
+            ],
+        }
+        seen = []
+
+        old_fetch = aur_update._fetch_json
+        old_hash = aur_update._hash_streamed
+        try:
+            aur_update._fetch_json = lambda url, timeout: payload
+
+            def fake_hash(url, timeout):
+                seen.append((url, timeout))
+                return "zipsha"
+
+            aur_update._hash_streamed = fake_hash
+            pkgver, source, checksum = aur_update.detect_upstream(
+                "https://api.example.invalid/latest",
+                aur_update.DEFAULT_ASSET_REGEX,
+                9,
+            )
+        finally:
+            aur_update._fetch_json = old_fetch
+            aur_update._hash_streamed = old_hash
+
+        self.assertEqual(pkgver, "1.0.7")
+        self.assertEqual(
+            source,
+            "m3u-tv-1.0.7-linux.zip::https://example.invalid/m3u-tv-v1.0.7-linux.zip",
+        )
+        self.assertEqual(checksum, "zipsha")
+        self.assertEqual(seen, [("https://example.invalid/m3u-tv-v1.0.7-linux.zip", 9)])
+
     def test_detect_upstream_selects_linux_asset_and_hashes_it(self):
         payload = {
             "tag_name": "v1.2.3",
@@ -88,7 +179,7 @@ class UpdateParsingTests(unittest.TestCase):
             aur_update._hash_streamed = fake_hash
             pkgver, source, checksum = aur_update.detect_upstream(
                 "https://api.example.invalid/latest",
-                r"m3u-tv-v(?P<version>[0-9]+\.[0-9]+\.[0-9]+)-linux\.tar\.gz$",
+                aur_update.DEFAULT_ASSET_REGEX,
                 9,
             )
         finally:
@@ -139,7 +230,7 @@ class UpdateParsingTests(unittest.TestCase):
             aur_update._hash_streamed = fake_hash
             pkgver, source, checksum = aur_update.detect_upstream(
                 "https://api.example.invalid/releases?per_page=20",
-                r"m3u-tv-v(?P<version>[0-9]+\.[0-9]+\.[0-9]+)-linux\.tar\.gz$",
+                aur_update.DEFAULT_ASSET_REGEX,
                 9,
             )
         finally:
@@ -155,8 +246,8 @@ class UpdateParsingTests(unittest.TestCase):
         payload = {
             "tag_name": "v1.2.3",
             "assets": [
-                {"name": "m3u-tv-v1.2.3-linux.tar.gz", "browser_download_url": "https://example.invalid/one.tar.gz"},
-                {"name": "m3u-tv-v1.2.4-linux.tar.gz", "browser_download_url": "https://example.invalid/two.tar.gz"},
+                {"name": "m3u-tv-v1.2.3-linux.zip", "browser_download_url": "https://example.invalid/one.zip"},
+                {"name": "m3u-tv-v1.2.4-linux.zip", "browser_download_url": "https://example.invalid/two.zip"},
             ],
         }
         old_fetch = aur_update._fetch_json
@@ -165,7 +256,7 @@ class UpdateParsingTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "multiple Linux release assets"):
                 aur_update.detect_upstream(
                     "https://api.example.invalid/latest",
-                    r"m3u-tv-v(?P<version>[0-9]+\.[0-9]+\.[0-9]+)-linux\.tar\.gz$",
+                    aur_update.DEFAULT_ASSET_REGEX,
                     9,
                 )
         finally:
