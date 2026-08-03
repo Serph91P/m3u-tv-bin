@@ -435,6 +435,69 @@ class UpdateParsingTests(unittest.TestCase):
         finally:
             aur_update._fetch_json = old_fetch
 
+    def test_generated_pkgver_rejects_shell_syntax_outside_arch_alnum_dot_underscore_plus_grammar(self):
+        unsafe_pkgver = "1.0.7$(touch${IFS}pkgver-executed)"
+        payload = {
+            "tag_name": "v1.0.7",
+            "assets": [
+                {
+                    "name": f"m3u-tv-v{unsafe_pkgver}-linux.zip",
+                    "browser_download_url": "https://example.invalid/m3u-tv-linux.zip",
+                }
+            ],
+        }
+        asset_regex = r"m3u-tv-v(?P<version>.+)-linux\.(?P<archive>zip)$"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pkgbuild = root / "PKGBUILD"
+            marker = root / "pkgver-executed"
+            pkgbuild.write_text(
+                "pkgver=1.0.6\n"
+                "source=('https://example.invalid/old.zip')\n"
+                "sha256sums=('oldsha')\n",
+                encoding="utf-8",
+            )
+
+            detected_error = None
+            old_fetch = aur_update._fetch_json
+            old_hash = aur_update._hash_streamed
+            try:
+                aur_update._fetch_json = lambda url, timeout: payload
+                aur_update._hash_streamed = lambda url, timeout: "newsha"
+                try:
+                    detected = aur_update.detect_upstream(
+                        "https://api.example.invalid/latest", asset_regex, 9
+                    )
+                except RuntimeError as error:
+                    detected_error = error
+                    detected = (
+                        unsafe_pkgver,
+                        "https://example.invalid/m3u-tv-linux.zip",
+                        "newsha",
+                    )
+            finally:
+                aur_update._fetch_json = old_fetch
+                aur_update._hash_streamed = old_hash
+
+            update_error = None
+            try:
+                aur_update.update_pkgbuild(pkgbuild, *detected, dry_run=False)
+            except RuntimeError as error:
+                update_error = error
+
+            subprocess.run(
+                ["bash", "-c", 'source "$1"', "bash", pkgbuild.name],
+                cwd=root,
+                check=True,
+            )
+
+            self.assertIsNotNone(detected_error)
+            self.assertRegex(str(detected_error), "invalid pkgver")
+            self.assertIsNotNone(update_error)
+            self.assertRegex(str(update_error), "invalid pkgver")
+            self.assertFalse(marker.exists())
+
     def test_replace_array_preserves_single_line_style(self):
         lines = ["source=('old')\n", "sha256sums=('0')\n"]
 
@@ -463,6 +526,17 @@ class UpdateParsingTests(unittest.TestCase):
             ],
         )
         self.assertEqual((start, end), (0, 4))
+
+    def test_extract_array_preserves_unquoted_url_fragment_and_closes_before_next_array(self):
+        lines = [
+            "source=(https://host/file#fragment)\n",
+            "sha256sums=('newsha')\n",
+        ]
+
+        tokens, start, end = aur_update._extract_array(lines, "source")
+
+        self.assertEqual(tokens, ["https://host/file#fragment"])
+        self.assertEqual((start, end), (0, 0))
 
     def test_generated_single_line_source_keeps_shell_payload_inert(self):
         with tempfile.TemporaryDirectory() as tmp:

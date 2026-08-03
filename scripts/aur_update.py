@@ -17,6 +17,7 @@ from urllib.request import Request, urlopen
 
 DEFAULT_RELEASE_API_URL = "https://api.github.com/repos/m3ue/m3u-tv/releases?per_page=20"
 DEFAULT_ASSET_REGEX = r"m3u-tv-v(?P<version>[0-9]+\.[0-9]+\.[0-9]+)-linux\.(?P<archive>zip|tar\.gz)$"
+ARCH_PKGVER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+]*")
 UA = "m3u-tv-bin-aur-auto-updater/1.0"
 
 
@@ -131,6 +132,13 @@ def _release_assets(payload: dict[str, object]) -> list[dict[str, object]]:
     return [asset for asset in assets if isinstance(asset, dict)]
 
 
+def _validate_pkgver(value: str) -> None:
+    if not ARCH_PKGVER_RE.fullmatch(value):
+        raise RuntimeError(
+            f"invalid pkgver {value!r}: expected Arch alphanumeric, '.', '_', or '+' characters"
+        )
+
+
 def detect_upstream(release_api_url: str, asset_regex: str, timeout: int) -> tuple[str, str, str]:
     payload = _fetch_json(release_api_url, timeout)
     releases = payload if isinstance(payload, list) else [payload]
@@ -170,6 +178,7 @@ def detect_upstream(release_api_url: str, asset_regex: str, timeout: int) -> tup
             version = tag[1:] if tag.startswith("v") else tag
         if not version:
             raise RuntimeError(f"could not extract version from asset {name}")
+        _validate_pkgver(version)
 
         archive = match.groupdict().get("archive")
         if not archive:
@@ -220,32 +229,46 @@ def _extract_array(lines: list[str], field: str) -> tuple[list[str], int, int]:
         quote = None
         escaped = False
         comment = False
+        at_word_start = True
         close_idx = None
+        token_chars: list[str] = []
         for pos, char in enumerate(block_text[open_idx + 1 :], start=open_idx + 1):
             if comment:
                 if char == "\n":
                     comment = False
+                    at_word_start = True
+                    token_chars.append(char)
                 continue
             if escaped:
                 escaped = False
+                at_word_start = False
+                token_chars.append(char)
                 continue
             if char == "\\" and quote != "'":
                 escaped = True
+                at_word_start = False
+                token_chars.append(char)
                 continue
             if quote:
+                token_chars.append(char)
                 if char == quote:
                     quote = None
                 continue
             if char in ("'", '"'):
                 quote = char
-            elif char == "#":
+                at_word_start = False
+                token_chars.append(char)
+            elif char == "#" and at_word_start:
                 comment = True
             elif char == ")":
                 close_idx = pos
                 break
+            else:
+                at_word_start = char.isspace() or char in ("|", "&", ";", "(", "<", ">")
+                token_chars.append(char)
         if close_idx is None:
             raise ValueError(f"Array field {field} has no closing )")
-        tokens = shlex.split(block_text[open_idx + 1 : close_idx], comments=True)
+        tokens = shlex.split("".join(token_chars), comments=False)
         end_idx = idx + block_text[:close_idx].count("\n")
         return tokens, idx, end_idx
     raise ValueError(f"Array field {field} not found")
@@ -277,6 +300,7 @@ def _replace_array_first(lines: list[str], field: str, new_value: str) -> tuple[
 
 
 def update_pkgbuild(pkgbuild_path: Path, new_pkgver: str, new_source: str, new_sha256: str, dry_run: bool) -> UpdateResult:
+    _validate_pkgver(new_pkgver)
     lines = _read_text(pkgbuild_path).splitlines(keepends=True)
     old_pkgver = _extract_field(lines, "pkgver")
     source_tokens, _, _ = _extract_array(lines, "source")
