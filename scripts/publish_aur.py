@@ -137,6 +137,8 @@ def _write_secret_files(workdir: Path, key: str, known_hosts: str) -> tuple[Path
 
 
 def push_package(args: argparse.Namespace) -> dict[str, object]:
+    if not re.fullmatch(r"[a-z0-9@_+][a-z0-9@._+-]*", args.package_name):
+        raise ValueError(f"invalid AUR package name: {args.package_name}")
     package_dir = _resolve_path(args.package_dir) if args.package_dir else _resolve_path(".") / "packages" / args.package_name
     pkgbuild = package_dir / "PKGBUILD"
     srcinfo = package_dir / ".SRCINFO"
