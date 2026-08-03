@@ -444,6 +444,26 @@ class UpdateParsingTests(unittest.TestCase):
         self.assertEqual(old, ("old",))
         self.assertEqual(lines[0], "source=('new-value')\n")
 
+    def test_extract_array_ignores_parentheses_inside_quotes_and_comments(self):
+        lines = [
+            "source=(\n",
+            "  'archive::https://example.invalid/release(1).zip'\n",
+            "  # old mirror )\n",
+            "  'fallback::https://example.invalid/release.zip'\n",
+            ")\n",
+        ]
+
+        tokens, start, end = aur_update._extract_array(lines, "source")
+
+        self.assertEqual(
+            tokens,
+            [
+                "archive::https://example.invalid/release(1).zip",
+                "fallback::https://example.invalid/release.zip",
+            ],
+        )
+        self.assertEqual((start, end), (0, 4))
+
     def test_generated_single_line_source_keeps_shell_payload_inert(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -474,6 +494,23 @@ class UpdateParsingTests(unittest.TestCase):
 
             self.assertFalse(sentinel.exists())
             self.assertEqual(result.stdout, source)
+
+    def test_update_pkgbuild_preserves_quoted_url_fragment_on_second_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pkgbuild = Path(tmp) / "PKGBUILD"
+            source = "archive::https://example.invalid/release.zip#fragment"
+            pkgbuild.write_text(
+                "pkgver=1.0.0\n"
+                "source=('archive::https://example.invalid/old.zip')\n"
+                "sha256sums=('oldsha')\n",
+                encoding="utf-8",
+            )
+
+            aur_update.update_pkgbuild(pkgbuild, "1.0.1", source, "newsha", False)
+            second = aur_update.update_pkgbuild(pkgbuild, "1.0.1", source, "newsha", False)
+
+            self.assertFalse(second.changed)
+            self.assertEqual(second.old_source, source)
 
     def test_run_updates_pkgbuild_before_generating_srcinfo(self):
         with tempfile.TemporaryDirectory() as tmp:

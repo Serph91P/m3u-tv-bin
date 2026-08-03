@@ -215,22 +215,38 @@ def _extract_array(lines: list[str], field: str) -> tuple[list[str], int, int]:
     for idx, line in enumerate(lines):
         if not open_re.match(line):
             continue
-        block_lines: list[str] = []
-        end_idx = idx
-        while end_idx < len(lines):
-            block_lines.append(lines[end_idx])
-            if ")" in lines[end_idx]:
+        block_text = "".join(lines[idx:])
+        open_idx = block_text.find("(")
+        quote = None
+        escaped = False
+        comment = False
+        close_idx = None
+        for pos, char in enumerate(block_text[open_idx + 1 :], start=open_idx + 1):
+            if comment:
+                if char == "\n":
+                    comment = False
+                continue
+            if escaped:
+                escaped = False
+                continue
+            if char == "\\" and quote != "'":
+                escaped = True
+                continue
+            if quote:
+                if char == quote:
+                    quote = None
+                continue
+            if char in ("'", '"'):
+                quote = char
+            elif char == "#":
+                comment = True
+            elif char == ")":
+                close_idx = pos
                 break
-            end_idx += 1
-        else:
+        if close_idx is None:
             raise ValueError(f"Array field {field} has no closing )")
-        block_text = "".join(block_lines)
-        before_comment = block_text.split("#", 1)[0]
-        open_idx = before_comment.find("(")
-        close_idx = before_comment.rfind(")")
-        if open_idx == -1 or close_idx == -1 or close_idx < open_idx:
-            raise ValueError(f"Malformed array field {field}")
-        tokens = shlex.split(before_comment[open_idx + 1 : close_idx])
+        tokens = shlex.split(block_text[open_idx + 1 : close_idx], comments=True)
+        end_idx = idx + block_text[:close_idx].count("\n")
         return tokens, idx, end_idx
     raise ValueError(f"Array field {field} not found")
 
