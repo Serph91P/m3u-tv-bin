@@ -17,6 +17,7 @@ from urllib.request import Request, urlopen
 
 DEFAULT_RELEASE_API_URL = "https://api.github.com/repos/m3ue/m3u-tv/releases?per_page=20"
 DEFAULT_ASSET_REGEX = r"m3u-tv-v(?P<version>[0-9]+\.[0-9]+\.[0-9]+)-linux\.(?P<archive>zip|tar\.gz)$"
+ARCH_PKGVER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+]*")
 UA = "m3u-tv-bin-aur-auto-updater/1.0"
 
 
@@ -82,6 +83,8 @@ def _to_path(value: str | None) -> Path:
 
 
 def resolve_paths(args: argparse.Namespace) -> tuple[Path, Path]:
+    if not re.fullmatch(r"[a-z0-9@_+][a-z0-9@._+-]*", args.package_name):
+        raise ValueError(f"invalid AUR package name: {args.package_name}")
     repo_root = Path(__file__).resolve().parents[1]
     package_dir = _to_path(args.package_dir) if args.package_dir else repo_root / "packages" / args.package_name
     pkgbuild_path = package_dir / "PKGBUILD"
@@ -129,6 +132,13 @@ def _release_assets(payload: dict[str, object]) -> list[dict[str, object]]:
     return [asset for asset in assets if isinstance(asset, dict)]
 
 
+def _validate_pkgver(value: str) -> None:
+    if not ARCH_PKGVER_RE.fullmatch(value):
+        raise RuntimeError(
+            f"invalid pkgver {value!r}: expected Arch alphanumeric, '.', '_', or '+' characters"
+        )
+
+
 def detect_upstream(release_api_url: str, asset_regex: str, timeout: int) -> tuple[str, str, str]:
     payload = _fetch_json(release_api_url, timeout)
     releases = payload if isinstance(payload, list) else [payload]
@@ -168,6 +178,7 @@ def detect_upstream(release_api_url: str, asset_regex: str, timeout: int) -> tup
             version = tag[1:] if tag.startswith("v") else tag
         if not version:
             raise RuntimeError(f"could not extract version from asset {name}")
+        _validate_pkgver(version)
 
         archive = match.groupdict().get("archive")
         if not archive:
@@ -213,22 +224,52 @@ def _extract_array(lines: list[str], field: str) -> tuple[list[str], int, int]:
     for idx, line in enumerate(lines):
         if not open_re.match(line):
             continue
-        block_lines: list[str] = []
-        end_idx = idx
-        while end_idx < len(lines):
-            block_lines.append(lines[end_idx])
-            if ")" in lines[end_idx]:
+        block_text = "".join(lines[idx:])
+        open_idx = block_text.find("(")
+        quote = None
+        escaped = False
+        comment = False
+        at_word_start = True
+        close_idx = None
+        token_chars: list[str] = []
+        for pos, char in enumerate(block_text[open_idx + 1 :], start=open_idx + 1):
+            if comment:
+                if char == "\n":
+                    comment = False
+                    at_word_start = True
+                    token_chars.append(char)
+                continue
+            if escaped:
+                escaped = False
+                at_word_start = False
+                token_chars.append(char)
+                continue
+            if char == "\\" and quote != "'":
+                escaped = True
+                at_word_start = False
+                token_chars.append(char)
+                continue
+            if quote:
+                token_chars.append(char)
+                if char == quote:
+                    quote = None
+                continue
+            if char in ("'", '"'):
+                quote = char
+                at_word_start = False
+                token_chars.append(char)
+            elif char == "#" and at_word_start:
+                comment = True
+            elif char == ")":
+                close_idx = pos
                 break
-            end_idx += 1
-        else:
+            else:
+                at_word_start = char.isspace() or char in ("|", "&", ";", "(", "<", ">")
+                token_chars.append(char)
+        if close_idx is None:
             raise ValueError(f"Array field {field} has no closing )")
-        block_text = "".join(block_lines)
-        before_comment = block_text.split("#", 1)[0]
-        open_idx = before_comment.find("(")
-        close_idx = before_comment.rfind(")")
-        if open_idx == -1 or close_idx == -1 or close_idx < open_idx:
-            raise ValueError(f"Malformed array field {field}")
-        tokens = shlex.split(before_comment[open_idx + 1 : close_idx])
+        tokens = shlex.split("".join(token_chars), comments=False)
+        end_idx = idx + block_text[:close_idx].count("\n")
         return tokens, idx, end_idx
     raise ValueError(f"Array field {field} not found")
 
@@ -248,8 +289,7 @@ def _replace_array_first(lines: list[str], field: str, new_value: str) -> tuple[
         return False, old_tokens
 
     if start == end:
-        quote = '"' if '"' in lines[start].split("(", 1)[1].split(")", 1)[0] else "'"
-        rendered = " ".join(f"{quote}{token}{quote}" for token in tokens)
+        rendered = " ".join(_quote(token) for token in tokens)
         prefix = lines[start].split("=", 1)[0]
         lines[start] = f"{prefix}=({rendered})\n"
     else:
@@ -260,6 +300,7 @@ def _replace_array_first(lines: list[str], field: str, new_value: str) -> tuple[
 
 
 def update_pkgbuild(pkgbuild_path: Path, new_pkgver: str, new_source: str, new_sha256: str, dry_run: bool) -> UpdateResult:
+    _validate_pkgver(new_pkgver)
     lines = _read_text(pkgbuild_path).splitlines(keepends=True)
     old_pkgver = _extract_field(lines, "pkgver")
     source_tokens, _, _ = _extract_array(lines, "source")
