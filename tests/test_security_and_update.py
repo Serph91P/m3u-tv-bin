@@ -240,6 +240,86 @@ class WorkflowTests(unittest.TestCase):
         for step in shell_steps:
             self.assertNotIn("${{", executable_shell_source(step))
 
+    def test_stale_reruns_refresh_and_retry_current_metadata_safely(self):
+        workflow = (REPO / ".github" / "workflows" / "aur-auto-update.yml").read_text(
+            encoding="utf-8"
+        )
+        steps = workflow_steps()
+
+        self.assertRegex(
+            workflow,
+            r"(?m)^concurrency:\n"
+            r"  group: aur-auto-update-\$\{\{ github\.ref \}\}\n"
+            r"  cancel-in-progress: false$",
+        )
+        self.assertRegex(
+            workflow,
+            r"(?m)^      - name: Checkout\n"
+            r"        uses: actions/checkout@[0-9a-f]{40}.*\n"
+            r"        with:\n"
+            r"          ref: \$\{\{ github\.ref \}\}$",
+        )
+
+        named_steps = {
+            str(step["name"]): step
+            for step in steps
+            if step["job"] == "aur_update"
+        }
+        verify = named_steps["Verify selected branch tip"]
+        verify_source = executable_shell_source(verify)
+        verify_lines = verify_source.splitlines()
+        self.assertIn('  refs/heads/*) ;;', verify_lines)
+        self.assertIn('git fetch --no-tags origin "$GITHUB_REF"', verify_lines)
+        self.assertIn('LOCAL_SHA=$(git rev-parse HEAD)', verify_lines)
+        self.assertIn('REMOTE_SHA=$(git rev-parse FETCH_HEAD)', verify_lines)
+        self.assertIn('if [ "$LOCAL_SHA" != "$REMOTE_SHA" ]; then', verify_lines)
+        self.assertLess(
+            steps.index(verify),
+            steps.index(named_steps["Run update script as unprivileged user"]),
+        )
+
+        commit_source = executable_shell_source(
+            named_steps["Commit package update back to GitHub"]
+        )
+        self.assertIn(
+            'git push origin "HEAD:$GITHUB_REF"',
+            commit_source.splitlines(),
+        )
+        self.assertNotIn("--force", commit_source)
+        commit_block = re.search(
+            r"(?ms)^      - name: Commit package update back to GitHub\n"
+            r"(?P<body>.*?)(?=^      - name:|\Z)",
+            workflow,
+        )
+        self.assertIsNotNone(commit_block)
+        self.assertNotIn("continue-on-error:", commit_block.group("body"))
+        self.assertLess(
+            steps.index(named_steps["Commit package update back to GitHub"]),
+            steps.index(named_steps["Push update to AUR"]),
+        )
+
+        build_condition = re.search(
+            r"(?m)^      - name: Build and run checks as unprivileged user\n"
+            r"        if: (.+)$",
+            workflow,
+        )
+        publish_condition = re.search(
+            r"(?m)^      - name: Push update to AUR\n        if: (.+)$",
+            workflow,
+        )
+        self.assertIsNotNone(build_condition)
+        self.assertIsNotNone(publish_condition)
+        self.assertEqual(
+            build_condition.group(1),
+            "${{ (steps.result.outputs.changed == 'true' || "
+            "env.FORCE_PUBLISH == 'true' || env.PUSH_TO_AUR == 'true') && "
+            "env.RUN_BUILD == 'true' }}",
+        )
+        self.assertEqual(
+            publish_condition.group(1),
+            "${{ env.PUSH_TO_AUR == 'true' }}",
+        )
+
 
 class UpdateParsingTests(unittest.TestCase):
     def test_resolve_paths_rejects_invalid_package_name_before_path_use(self):
