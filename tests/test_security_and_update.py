@@ -246,12 +246,17 @@ class WorkflowTests(unittest.TestCase):
         )
         steps = workflow_steps()
 
-        self.assertRegex(
-            workflow,
+        concurrency = re.search(
             r"(?m)^concurrency:\n"
-            r"  group: aur-auto-update-\$\{\{ github\.ref \}\}\n"
-            r"  cancel-in-progress: false$",
+            r"  group: (?P<group>[^\n]+)\n"
+            r"  cancel-in-progress: (?P<cancel>[^\n]+)$",
+            workflow,
         )
+        if concurrency is None:
+            self.fail("workflow is missing its concurrency declaration")
+        self.assertEqual(concurrency.group("group"), "aur-auto-update-m3u-tv-bin")
+        self.assertNotIn("github.ref", concurrency.group("group"))
+        self.assertEqual(concurrency.group("cancel"), "false")
         self.assertRegex(
             workflow,
             r"(?m)^      - name: Checkout\n"

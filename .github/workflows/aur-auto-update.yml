@@ -34,7 +34,7 @@ on:
         type: boolean
 
 concurrency:
-  group: aur-auto-update-${{ github.ref }}
+  group: aur-auto-update-m3u-tv-bin
   cancel-in-progress: false
 
 jobs:
