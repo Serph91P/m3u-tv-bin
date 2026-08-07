@@ -33,6 +33,10 @@ on:
         default: false
         type: boolean
 
+concurrency:
+  group: aur-auto-update-m3u-tv-bin
+  cancel-in-progress: false
+
 jobs:
   aur_update:
     name: Update and publish AUR package
@@ -63,6 +67,8 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.ref }}
 
       - name: Prepare workspace permissions
         run: |
@@ -159,6 +165,20 @@ jobs:
           printf 'PUSH_TO_AUR=%s\n' "$PUSH" >> "$GITHUB_ENV"
           printf 'FORCE_PUBLISH=%s\n' "$FORCE_PUBLISH" >> "$GITHUB_ENV"
 
+      - name: Verify selected branch tip
+        run: |
+          case "$GITHUB_REF" in
+            refs/heads/*) ;;
+            *) echo "Refusing to update a non-branch ref: $GITHUB_REF" >&2; exit 1 ;;
+          esac
+          git fetch --no-tags origin "$GITHUB_REF"
+          LOCAL_SHA=$(git rev-parse HEAD)
+          REMOTE_SHA=$(git rev-parse FETCH_HEAD)
+          if [ "$LOCAL_SHA" != "$REMOTE_SHA" ]; then
+            echo "Selected branch advanced during checkout; refusing stale metadata update." >&2
+            exit 1
+          fi
+
       - name: Run update script as unprivileged user
         id: update
         run: |
@@ -181,7 +201,7 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Build and run checks as unprivileged user
-        if: ${{ (steps.result.outputs.changed == 'true' || env.FORCE_PUBLISH == 'true') && env.RUN_BUILD == 'true' }}
+        if: ${{ (steps.result.outputs.changed == 'true' || env.FORCE_PUBLISH == 'true' || env.PUSH_TO_AUR == 'true') && env.RUN_BUILD == 'true' }}
         run: |
           runuser -u aurbuild --preserve-environment -- bash -lc '
             set -euo pipefail
@@ -212,10 +232,10 @@ jobs:
             exit 0
           fi
           git commit -m "$AUR_PACKAGE_NAME: update to $PACKAGE_VERSION"
-          git push
+          git push origin "HEAD:$GITHUB_REF"
 
       - name: Push update to AUR
-        if: ${{ (steps.result.outputs.changed == 'true' || env.FORCE_PUBLISH == 'true') && env.PUSH_TO_AUR == 'true' }}
+        if: ${{ env.PUSH_TO_AUR == 'true' }}
         env:
           AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
           AUR_SSH_KNOWN_HOSTS: ${{ secrets.AUR_SSH_KNOWN_HOSTS }}
