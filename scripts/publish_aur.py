@@ -171,15 +171,15 @@ def push_package(args: argparse.Namespace) -> dict[str, object]:
         subprocess.run(["git", "-C", aur_dir.as_posix(), "config", "user.name", args.commit_name], check=True, env=env)
         subprocess.run(["git", "-C", aur_dir.as_posix(), "add", "PKGBUILD", ".SRCINFO"], check=True, env=env)
 
-        status = subprocess.run(
-            ["git", "-C", aur_dir.as_posix(), "status", "--porcelain"],
-            check=True,
+        staged_diff = subprocess.run(
+            ["git", "-C", aur_dir.as_posix(), "diff", "--cached", "--quiet"],
+            check=False,
             env=env,
-            capture_output=True,
-            text=True,
         )
-        if not status.stdout.strip():
+        if staged_diff.returncode == 0:
             return {"pushed": False, "remote": remote, "reason": "No local changes for AUR package"}
+        if staged_diff.returncode != 1:
+            raise subprocess.CalledProcessError(staged_diff.returncode, staged_diff.args)
 
         subprocess.run(
             ["git", "-C", aur_dir.as_posix(), "commit", "-m", f"{args.package_name}: update to {version}"],
