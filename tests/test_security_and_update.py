@@ -111,6 +111,124 @@ class PublishSecurityTests(unittest.TestCase):
         self.assertIn("UserKnownHostsFile=", command)
         self.assertNotIn("StrictHostKeyChecking=no", command)
 
+    def test_push_ignores_untracked_outputs_when_metadata_is_unchanged(self):
+        metadata = "pkgname=m3u-tv-bin\npkgver=1.0.0\n"
+        srcinfo = "pkgbase = m3u-tv-bin\n\tpkgver = 1.0.0\n"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remote = root / "remote.git"
+            seed = root / "seed"
+            package = root / "package"
+            subprocess.run(["git", "init", "--bare", remote.as_posix()], check=True)
+            subprocess.run(["git", "init", "-b", "master", seed.as_posix()], check=True)
+            subprocess.run(
+                ["git", "-C", seed.as_posix(), "config", "user.email", "test@example.invalid"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", seed.as_posix(), "config", "user.name", "Test User"],
+                check=True,
+            )
+            (seed / "PKGBUILD").write_text(metadata, encoding="utf-8")
+            (seed / ".SRCINFO").write_text(srcinfo, encoding="utf-8")
+            subprocess.run(
+                ["git", "-C", seed.as_posix(), "add", "PKGBUILD", ".SRCINFO"],
+                check=True,
+            )
+            subprocess.run(["git", "-C", seed.as_posix(), "commit", "-m", "initial"], check=True)
+            subprocess.run(["git", "-C", seed.as_posix(), "remote", "add", "origin", remote.as_posix()], check=True)
+            subprocess.run(["git", "-C", seed.as_posix(), "push", "origin", "master"], check=True)
+
+            package.mkdir()
+            (package / "PKGBUILD").write_text(metadata, encoding="utf-8")
+            (package / ".SRCINFO").write_text(srcinfo, encoding="utf-8")
+            (package / "m3u-tv-bin-1.0.0-1-x86_64.pkg.tar.zst").write_text(
+                "untrusted build output\n", encoding="utf-8"
+            )
+            args = argparse.Namespace(
+                package_name="m3u-tv-bin",
+                package_dir=str(package),
+                aur_remote_template=remote.as_posix(),
+                push_ssh_key="dummy-key",
+                ssh_known_hosts="aur.archlinux.org ssh-ed25519 dummy-key",
+                commit_email="actions@github.com",
+                commit_name="AUR Update Bot",
+                package_ver=None,
+            )
+
+            result = publish_aur.push_package(args)
+
+            self.assertEqual(
+                result,
+                {
+                    "pushed": False,
+                    "remote": remote.as_posix(),
+                    "reason": "No local changes for AUR package",
+                },
+            )
+            commits = subprocess.run(
+                ["git", "--git-dir", remote.as_posix(), "rev-list", "--count", "master"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(commits.stdout.strip(), "1")
+
+    def test_push_commits_only_changed_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remote = root / "remote.git"
+            seed = root / "seed"
+            package = root / "package"
+            subprocess.run(["git", "init", "--bare", remote.as_posix()], check=True)
+            subprocess.run(["git", "init", "-b", "master", seed.as_posix()], check=True)
+            subprocess.run(
+                ["git", "-C", seed.as_posix(), "config", "user.email", "test@example.invalid"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", seed.as_posix(), "config", "user.name", "Test User"],
+                check=True,
+            )
+            (seed / "PKGBUILD").write_text("pkgname=m3u-tv-bin\npkgver=1.0.0\n", encoding="utf-8")
+            (seed / ".SRCINFO").write_text("pkgbase = m3u-tv-bin\n\tpkgver = 1.0.0\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "-C", seed.as_posix(), "add", "PKGBUILD", ".SRCINFO"],
+                check=True,
+            )
+            subprocess.run(["git", "-C", seed.as_posix(), "commit", "-m", "initial"], check=True)
+            subprocess.run(["git", "-C", seed.as_posix(), "remote", "add", "origin", remote.as_posix()], check=True)
+            subprocess.run(["git", "-C", seed.as_posix(), "push", "origin", "master"], check=True)
+
+            package.mkdir()
+            (package / "PKGBUILD").write_text("pkgname=m3u-tv-bin\npkgver=1.0.1\n", encoding="utf-8")
+            (package / ".SRCINFO").write_text("pkgbase = m3u-tv-bin\n\tpkgver = 1.0.1\n", encoding="utf-8")
+            (package / "m3u-tv-bin-1.0.1-1-x86_64.pkg.tar.zst").write_text(
+                "untrusted build output\n", encoding="utf-8"
+            )
+            result = publish_aur.push_package(
+                argparse.Namespace(
+                    package_name="m3u-tv-bin",
+                    package_dir=str(package),
+                    aur_remote_template=remote.as_posix(),
+                    push_ssh_key="dummy-key",
+                    ssh_known_hosts="aur.archlinux.org ssh-ed25519 dummy-key",
+                    commit_email="actions@github.com",
+                    commit_name="AUR Update Bot",
+                    package_ver=None,
+                )
+            )
+
+            self.assertTrue(result["pushed"])
+            tree = subprocess.run(
+                ["git", "--git-dir", remote.as_posix(), "ls-tree", "--name-only", "master"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(tree.stdout.splitlines(), [".SRCINFO", "PKGBUILD"])
+
 
 class PkgbuildTests(unittest.TestCase):
     def test_pkgbuild_installs_wrapper_with_ld_library_path(self):
